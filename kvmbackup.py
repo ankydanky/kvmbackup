@@ -1,6 +1,13 @@
 #! /usr/bin/env python
 # coding: utf-8
 
+"""
+KVMBackup is licensed under GNU General Public License v3.0
+Please refer to https://opensource.org/licenses/GPL-3.0 for more information
+
+Originally written by NDK
+"""
+
 from __future__ import unicode_literals, print_function
 
 import os
