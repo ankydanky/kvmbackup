@@ -201,7 +201,6 @@ class KVMBackup(object):
             print("\t ==> starting backup...")
             for num in range(len(dom.disks)):
                 dom.backup(num)
-            print(" done.")
             if self.ignore_resume:
                 continue
             print("\t ==> resuming operation.")
