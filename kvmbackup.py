@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#! /usr/bin/env python3
 # coding: utf-8
 
 """
@@ -8,18 +8,18 @@ Please refer to https://opensource.org/licenses/GPL-3.0 for more information
 Originally written by NDK
 """
 
-from __future__ import unicode_literals, print_function
-
 import os
 import sys
 import re
 import time
 import xml.etree.ElementTree as xml
 import subprocess
+import io
 
 kvm_config = "/etc/libvirt/qemu"
-dest_folder = "/mnt/backup"
-max_retries = 5
+dest_folder = "/data/backup"
+max_retries = 4
+retry_interval = 30
 offmode = "shutdown"
 exclude = []
 
@@ -53,7 +53,7 @@ class KVMDomain(object):
         )
         proc.wait()
         stdout = proc.communicate()[0]
-        for row in stdout.split("\n")[2:-2]:
+        for row in stdout.decode().split("\n")[2:-2]:
             cols = re.split("\s{1,}", row)
             if cols[2] == self.name:
                 return cols[3]
@@ -80,56 +80,58 @@ class KVMDomain(object):
         except OSError:
             pass
         src_file = open(self.disks[disknum], "rb")
-        dest_file = open(os.path.join(dest_folder, filename), "ab")
+        dest_file = open(os.path.join(dest_folder, filename), "wb")
         total_size = os.stat(self.disks[disknum]).st_size
         transfered = 0
         trans_per_sec = 0
         start_time = int(time.time())
         while True:
-            buf = 8192
-            data = src_file.read(buf)
+            buf_size = io.DEFAULT_BUFFER_SIZE
+            data = src_file.read(buf_size)
             if not data:
                 break
             dest_file.write(data)
-            transfered += buf
+            transfered += buf_size
             seconds = int(time.time()) - start_time
             try:
                 trans_per_sec = int((transfered/seconds) / 1024 / 1024)
             except ZeroDivisionError:
                 pass
-            sys.stdout.write(
-                "\r\t ==> %s / %s MB (%s seconds running, overall speed: %s MB/s)" % (
-                    transfered/1024/1024, total_size/1024/1024, seconds, trans_per_sec
-                )
+            transfered_mb = int(round(transfered / 1024 / 1024, 0))
+            transfer_total = int(round(total_size / 1024 / 1024, 0))
+            print(
+                f"\t ==> {transfered_mb} / {transfer_total} MB ({seconds} seconds running, overall speed: {trans_per_sec} MB/s)",
+                end="\r",
+                flush=True
             )
-            sys.stdout.flush()
         src_file.close()
         dest_file.close()
+        print("", flush=True)
     
     def suspend(self):
         proc = subprocess.Popen(
-            "virsh suspend %s" % self.name,
+            f"virsh suspend {self.name}",
             shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         proc.wait()
     
     def resume(self):
         proc = subprocess.Popen(
-            "virsh resume %s" % self.name,
+            f"virsh resume {self.name}",
             shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         proc.wait()
         
     def shutdown(self):
         proc = subprocess.Popen(
-            "virsh shutdown %s" % self.name, shell=True,
+            f"virsh shutdown {self.name}", shell=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         proc.wait()
     
     def start(self):
         proc = subprocess.Popen(
-            "virsh start %s" % self.name, shell=True,
+            f"virsh start {self.name}", shell=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         proc.wait()
@@ -164,65 +166,50 @@ class KVMBackup(object):
     def initBackup(self):
         for dom in self.domains:
             abort = False
-            sys.stdout.write("Checking state for %s... " % dom.name)
-            sys.stdout.flush()
+            print(f"Checking state for {dom.name}... ", end="", flush=True)
             if not dom.isRunning() and not self.ignore_shutdown:
-                sys.stdout.write("not running.\n")
-                sys.stdout.flush()
+                print("not running.")
                 continue
             if offmode == "shutdown":
-                sys.stdout.write("\n\t ==> shutting down. waiting 60 seconds.\n")
-                sys.stdout.flush()
+                print(f"\n\t ==> shutting down. waiting {retry_interval} seconds.")
                 dom.shutdown()
-                time.sleep(60)
+                time.sleep(retry_interval)
             else:
-                sys.stdout.write("\n\t ==> suspending. waiting 60 seconds.\n")
-                sys.stdout.flush()
+                print(f"\n\t ==> suspending. waiting {retry_interval} seconds.")
                 dom.suspend()
-                time.sleep(60)
+                time.sleep(retry_interval)
             retry = 0
             if offmode == "shutdown":
                 while not dom.isShutdown():
-                    sys.stdout.write("\t ==> still waiting...\n")
-                    sys.stdout.flush()
-                    time.sleep(60)
+                    print("\t ==> still waiting...")
+                    time.sleep(retry_interval)
                     retry += 1
                     if retry == max_retries:
                         abort = True
                         break
             else:
                 while not dom.isSuspended():
-                    sys.stdout.write("\t ==> still waiting...\n")
-                    sys.stdout.flush()
-                    time.sleep(60)
+                    print("\t ==> still waiting...")
+                    time.sleep(retry_interval)
                     retry += 1
                     if retry == max_retries:
                         abort = True
                         break
             if abort:
-                sys.stdout.write("\t ==> taking too long. skipping.\n")
-                sys.stdout.flush()
+                print("\t ==> taking too long. skipping.")
                 continue
-            sys.stdout.write("\t ==> starting backup... \n")
-            sys.stdout.flush()
-            for num in xrange(len(dom.disks)):
+            print("\t ==> starting backup...")
+            for num in range(len(dom.disks)):
                 dom.backup(num)
-            sys.stdout.write(" done.\n")
+            print(" done.")
             if self.ignore_resume:
                 continue
-            sys.stdout.write("\t ==> resuming operation.\n")
-            sys.stdout.flush()
-            if dom.isShutdown():
-                dom.start()
-            else:
-                dom.resume()
+            print("\t ==> resuming operation.")
+            dom.start() if dom.isShutdown() else dom.resume()
     
     def rollback(self):
         for dom in self.domains:
-            if dom.isShutdown():
-                dom.start()
-            else:
-                dom.resume()
+            dom.start() if dom.isShutdown() else dom.resume()
     
     def run(self):
         self.getDomains()
@@ -235,13 +222,13 @@ if __name__ == '__main__':
             len(sys.argv) > 2 or
             "--help" in sys.argv or 
             "help" in sys.argv):
-        print("""
-Usage: %s [OPTION]
+        print(f"""
+Usage: {sys.argv[0]} [OPTION]
 OPTION are:
     DOMAIN      KVM DOMAIN to backup (e.g. Server1, found with 'virsh list')
     --all       find all domains and backup them (running/online ONLY)
     --help      show this message
-        """ % sys.argv[0])
+        """)
         sys.exit(0)
     try:
         app.run()
